@@ -2,6 +2,7 @@ import subprocess
 import sys
 import os
 import re
+import urllib.parse
 import streamlit as st
 import pandas as pd
 
@@ -34,7 +35,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Control de estado
+# Control de estado de sesión
 if "resultados" not in st.session_state:
     st.session_state.resultados = []
     st.session_state.lista_referencias = []
@@ -52,52 +53,60 @@ with col_logo:
 
 with col_titulo:
     st.title("🚜 Buscador CNH - Extracción de Pesos")
-    st.markdown("Consulta en **MyCNHStore (Case IH / New Holland)** | Salida principal en **Libras** y secundaria en **Kilos**.")
+    st.markdown("Consulta multitienda en **Messicks, MyCNHStore y Red CNH** | Salida principal en **Libras** y secundaria en **Kilos**.")
 
 st.divider()
 
 def extraer_peso_universal(texto):
+    """Extrae y normaliza el peso a Libras desde texto plano."""
     if not texto:
         return None
     
-    # 1. Prioridad: Búsqueda en KG / G
-    m_kg = re.search(r'(?:Package\s*Weight|Weight)[\s\n:-]*([\d\.,]+)\s*(?:kg|kilo|kilograms?)\b', texto, re.IGNORECASE)
-    if not m_kg:
-        m_kg = re.search(r'([\d\.,]+)\s*(?:kg|kilo|kilograms?)\b', texto, re.IGNORECASE)
-    if m_kg:
-        try:
-            val = float(m_kg.group(1).replace(",", "."))
-            return val * 2.20462262
-        except: pass
+    # 1. Búsqueda explícita de peso en Libras (lb / lbs)
+    patrones_lb = [
+        r'(?:Weight|Lbs?|Package\s*Weight|Shipping\s*Weight)[\s\n:-]*([\d\.,]+)\s*(?:lbs?|pounds?)\b',
+        r'([\d\.,]+)\s*(?:lbs?|pounds?)\b',
+        r'(?:Weight|Peso)[\s\n:-]*([\d\.,]+)'
+    ]
+    for pat in patrones_lb:
+        m = re.search(pat, texto, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", "."))
+                if 0.01 <= val <= 2500.0:
+                    return val
+            except: pass
 
-    m_g = re.search(r'(?:Package\s*Weight|Weight)[\s\n:-]*([\d\.,]+)\s*(?:g|gramos?|grams?)\b', texto, re.IGNORECASE)
-    if m_g:
-        try:
-            val = float(m_g.group(1).replace(",", "."))
-            return (val / 1000.0) * 2.20462262
-        except: pass
+    # 2. Búsqueda en Kilos (kg / kilogramos)
+    patrones_kg = [
+        r'(?:Weight|Package\s*Weight|Shipping\s*Weight)[\s\n:-]*([\d\.,]+)\s*(?:kg|kilo|kilograms?)\b',
+        r'([\d\.,]+)\s*(?:kg|kilo|kilograms?)\b'
+    ]
+    for pat in patrones_kg:
+        m = re.search(pat, texto, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", "."))
+                if 0.005 <= val <= 1200.0:
+                    return val * 2.20462262
+            except: pass
 
-    # 2. Búsqueda si viene en Libras u Onzas
-    m_lb = re.search(r'(?:Package\s*Weight|Weight)[\s\n:-]*([\d\.,]+)\s*(?:lb|lbs?)\b', texto, re.IGNORECASE)
-    if not m_lb:
-        m_lb = re.search(r'([\d\.,]+)\s*(?:lb|lbs?)\b', texto, re.IGNORECASE)
-    if m_lb:
-        try:
-            return float(m_lb.group(1).replace(",", "."))
-        except: pass
-
+    # 3. Búsqueda en Onzas (oz)
     m_oz = re.search(r'([\d\.,]+)\s*(?:oz|ounces?)\b', texto, re.IGNORECASE)
     if m_oz:
         try:
-            return float(m_oz.group(1).replace(",", ".")) / 16.0
+            val = float(m_oz.group(1).replace(",", "."))
+            return val / 16.0
         except: pass
 
     return None
 
-def descartar_modales_cnh(page):
+def descartar_modales(page):
+    """Descarta banners de cookies y modales que bloqueen la visibilidad."""
     selectores = [
         "button#onetrust-accept-btn-handler",
         "button:has-text('Accept All Cookies')",
+        "button:has-text('Accept All')",
         "button:has-text('Select Later')",
         "button:has-text('Dismiss')",
         "button:has-text('Close')",
@@ -107,11 +116,11 @@ def descartar_modales_cnh(page):
         try:
             btn = page.locator(sel)
             if btn.count() > 0 and btn.first.is_visible():
-                btn.first.click(timeout=400)
+                btn.first.click(timeout=350)
         except: pass
 
 st.write("### 1. Pega tu lista de combate CNH:")
-referencias_input = st.text_area("Referencias (una por línea):", height=150, placeholder="84269799\n47833568\n87384351")
+referencias_input = st.text_area("Referencias (una por línea):", height=150, placeholder="51572706\n92265164\n84576869")
 
 col_btn1, col_btn2, col_btn3 = st.columns(3)
 
@@ -146,68 +155,105 @@ if st.session_state.estado == "PROCESANDO":
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process"
-            ]
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1400, "height": 900}
         )
         page = context.new_page()
 
         while st.session_state.indice_actual < total:
             idx = st.session_state.indice_actual
             ref = st.session_state.lista_referencias[idx].upper()
-            texto_progreso.text(f"Extrayendo peso de: {ref} ({idx + 1} de {total})...")
+            texto_progreso.text(f"Rastreando peso de CNH: {ref} ({idx + 1} de {total})...")
             barra_progreso.progress((idx + 1) / total)
             peso_lb = None
 
+            # =================================================================
+            # MOTOR 1: MESSICKS (Líder en catálogo Case IH / New Holland con peso en lbs)
+            # =================================================================
             try:
-                # Motor 1: URL directa CNH Case IH
-                url_directa = f"https://www.mycnhstore.com/us/en/caseih/p/{ref}"
-                page.goto(url_directa, timeout=25000)
+                url_messicks = f"https://www.messicks.com/search?q={ref}"
+                page.goto(url_messicks, timeout=20000)
                 page.wait_for_timeout(1000)
-                descartar_modales_cnh(page)
-
-                if "/p/" in page.url:
-                    for _ in range(2):
-                        page.mouse.wheel(0, 500)
-                        page.wait_for_timeout(300)
-                    texto_cnh = page.evaluate("document.body.innerText")
-                    peso_lb = extraer_peso_universal(texto_cnh)
-
-                # Motor 2: Buscador interno
-                if peso_lb is None:
-                    url_search = f"https://www.mycnhstore.com/us/en/caseih/search?text={ref}"
-                    page.goto(url_search, timeout=25000)
-                    page.wait_for_timeout(1200)
-                    descartar_modales_cnh(page)
-
-                    enlaces = page.locator('a[href*="/p/"]')
-                    if enlaces.count() > 0:
-                        enlaces.first.click(force=True, timeout=3000)
-                        page.wait_for_timeout(1500)
-                        descartar_modales_cnh(page)
-                        texto_cnh = page.evaluate("document.body.innerText")
-                        peso_lb = extraer_peso_universal(texto_cnh)
-
-                # Motor 3: Respaldo en red
-                if peso_lb is None:
-                    texto_progreso.text(f"Buscando respaldo global para: {ref}...")
-                    url_google = f"https://www.google.com/search?q=Case+IH+part+{ref}+weight+kg+lbs"
-                    page.goto(url_google, timeout=18000)
-                    page.wait_for_timeout(800)
-                    texto_web = page.evaluate("document.body.innerText")
-                    peso_lb = extraer_peso_universal(texto_web)
-
+                descartar_modales(page)
+                
+                # Si redirige directo o si hay que entrar a la ficha del producto
+                link_prod = page.locator(f"a[href*='/part/'], a[href*='{ref.lower()}']")
+                if link_prod.count() > 0 and "/part/" not in page.url:
+                    try:
+                        link_prod.first.click(force=True, timeout=2500)
+                        page.wait_for_timeout(1000)
+                    except: pass
+                
+                texto_messicks = page.evaluate("document.body.innerText")
+                peso_lb = extraer_peso_universal(texto_messicks)
             except Exception:
                 pass
 
-            # Protocolo fantasma si no existe peso registrado
+            # =================================================================
+            # MOTOR 2: MYCNHSTORE OFICIAL (Case IH / New Holland)
+            # =================================================================
+            if peso_lb is None:
+                try:
+                    url_cnh = f"https://www.mycnhstore.com/us/en/caseih/p/{ref}"
+                    page.goto(url_cnh, timeout=22000)
+                    page.wait_for_timeout(1200)
+                    descartar_modales(page)
+                    
+                    if "/p/" not in page.url:
+                        url_search = f"https://www.mycnhstore.com/us/en/caseih/search?text={ref}"
+                        page.goto(url_search, timeout=20000)
+                        page.wait_for_timeout(1000)
+                        descartar_modales(page)
+                        enlaces = page.locator('a[href*="/p/"]')
+                        if enlaces.count() > 0:
+                            enlaces.first.click(force=True, timeout=2500)
+                            page.wait_for_timeout(1200)
+                    
+                    # Scroll forzado para despertar las especificaciones dinámicas
+                    for scroll_pos in [400, 800, 1400]:
+                        page.evaluate(f"window.scrollTo(0, {scroll_pos})")
+                        page.wait_for_timeout(250)
+                    
+                    texto_cnh = page.evaluate("document.body.innerText")
+                    peso_lb = extraer_peso_universal(texto_cnh)
+                except Exception:
+                    pass
+
+            # =================================================================
+            # MOTOR 3: COLEMAN EQUIPMENT (Distribuidor oficial CNH)
+            # =================================================================
+            if peso_lb is None:
+                try:
+                    url_coleman = f"https://www.colemanequip.com/case-parts/?search={ref}"
+                    page.goto(url_coleman, timeout=18000)
+                    page.wait_for_timeout(1000)
+                    texto_col = page.evaluate("document.body.innerText")
+                    peso_lb = extraer_peso_universal(texto_col)
+                except Exception:
+                    pass
+
+            # =================================================================
+            # MOTOR 4: RASTREO GLOBAL DIRIGIDO (Google Search en vivo)
+            # =================================================================
+            if peso_lb is None:
+                try:
+                    query = urllib.parse.quote(f"CNH {ref} weight lbs OR kg (Case IH OR New Holland)")
+                    url_search_engine = f"https://www.google.com/search?q={query}"
+                    page.goto(url_search_engine, timeout=18000)
+                    page.wait_for_timeout(900)
+                    try:
+                        page.locator("button:has-text('Aceptar todo'), button:has-text('Accept all')").click(timeout=1000)
+                    except: pass
+                    
+                    texto_web = page.evaluate("document.body.innerText")
+                    peso_lb = extraer_peso_universal(texto_web)
+                except Exception:
+                    pass
+
+            # Protocolo de fallback si ninguna fuente pública lo registra
             es_estimado = False
             if peso_lb is None or peso_lb <= 0:
                 peso_lb = 0.05
@@ -225,7 +271,9 @@ if st.session_state.estado == "PROCESANDO":
     st.session_state.estado = "FINALIZADO"
     st.rerun()
 
-# Resultados
+# ----------------------------------------------------
+# VISUALIZACIÓN DE RESULTADOS
+# ----------------------------------------------------
 if st.session_state.estado in ["PAUSADO", "FINALIZADO"] and st.session_state.resultados:
     if st.session_state.estado == "PAUSADO":
         st.warning(f"⏸️ Pausado en la referencia {st.session_state.indice_actual}.")
@@ -241,7 +289,7 @@ if st.session_state.estado in ["PAUSADO", "FINALIZADO"] and st.session_state.res
 
         filas.append({
             "Referencia": ref,
-            "Libras (Principal)": f"{lb:.3f}".replace(".", ","),
+            "Libras (Principal)": f"{lb:.2f}".replace(".", ","),
             "Kilos": f"{kg:.3f}".replace(".", ","),
             "Estado": "Estimado (0,05 lb)" if est else "Exacto"
         })
