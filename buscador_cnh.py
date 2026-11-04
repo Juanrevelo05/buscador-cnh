@@ -1,7 +1,22 @@
-import re
+import subprocess
+import sys
 import os
+import re
 import streamlit as st
 import pandas as pd
+
+# -------------------------------------------------------------------
+# INSTALACIÓN AUTOMÁTICA DE CHROMIUM EN STREAMLIT CLOUD
+# -------------------------------------------------------------------
+@st.cache_resource
+def instalar_navegador():
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+
+try:
+    instalar_navegador()
+except Exception as e:
+    st.error(f"Error instalando el navegador: {e}")
+
 from playwright.sync_api import sync_playwright
 
 st.set_page_config(page_title="Buscador CNH", page_icon="🚜", layout="wide")
@@ -26,10 +41,14 @@ if "resultados" not in st.session_state:
     st.session_state.indice_actual = 0
     st.session_state.estado = "ESPERANDO"
 
-col_logo, col_titulo = st.columns([1.2, 5.8])
+col_logo, col_titulo = st.columns([1.5, 5.5])
 with col_logo:
-    if os.path.exists("logo.jpg"): st.image("logo.jpg", width=180)
-    elif os.path.exists("logo.png"): st.image("logo.png", width=180)
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=180)
+    elif os.path.exists("logo.jpg"):
+        st.image("logo.jpg", width=180)
+    elif os.path.exists("logo.jpeg"):
+        st.image("logo.jpeg", width=180)
 
 with col_titulo:
     st.title("🚜 Buscador CNH - Extracción de Pesos")
@@ -125,7 +144,15 @@ if st.session_state.estado == "PROCESANDO":
     texto_progreso = st.empty()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process"
+            ]
+        )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800}
